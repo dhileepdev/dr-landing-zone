@@ -1,0 +1,13 @@
+# Example Terraform backend configuration — local (Floci).
+# Copy to backend.hcl and fill in bucket/table names before terraform init.
+# Start Floci: floci start   (AWS emulator on http://localhost:4566)
+# Create bucket: aws --endpoint-url http://localhost:4566 s3 mb s3://dr-terraform-state
+
+bucket         = "dr-terraform-state"
+key            = "dr-incident-dashboard/terraform.tfstate"
+region         = "ap-southeast-2"
+endpoint       = "http://localhost:4566"
+skip_credentials_validation = true
+skip_metadata_api_check     = true
+skip_requesting_account_id  = true
+dynamodb_table = ""          # DynamoDB locking skipped — single-user demo

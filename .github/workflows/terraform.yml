@@ -1,0 +1,96 @@
+name: Terraform CI/CD + Drift Detection
+
+on:
+  push:
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */6 * * *"
+
+jobs:
+  validate:
+    if: github.event_name == 'push' && github.ref_name != 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - run: terraform validate
+        working-directory: terraform
+
+  plan:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - run: terraform init -backend-config=backend.hcl.example
+        working-directory: terraform
+      - run: terraform plan
+        working-directory: terraform
+        env:
+          AWS_ACCESS_KEY_ID: "test"
+          AWS_SECRET_ACCESS_KEY: "test"
+          AWS_DEFAULT_REGION: ap-southeast-2
+          TF_VAR_availability_zones: '["ap-southeast-2a", "ap-southeast-2b"]'
+
+  apply:
+    if: github.event_name == 'workflow_dispatch' && github.ref_name == 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - run: terraform init -backend-config=backend.hcl.example
+        working-directory: terraform
+      - run: terraform apply -auto-approve
+        working-directory: terraform
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ap-southeast-2
+          TF_VAR_availability_zones: '["ap-southeast-2a", "ap-southeast-2b"]'
+
+  drift:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - run: terraform init -backend-config=backend.hcl.example
+        working-directory: terraform
+      - run: |
+            set +e
+            mkdir -p drift
+            terraform plan -detailed-exitcode -out=drift.plan > /dev/null 2>&1
+            EXIT_CODE=$?
+            if [ "$EXIT_CODE" -eq 0 ]; then
+              DRIFT="false"
+              RESOURCES="[]"
+            elif [ "$EXIT_CODE" -eq 2 ]; then
+              DRIFT="true"
+              terraform show -json drift.plan | jq \
+                '[.resource_changes[] | {address, action: .change.actions[0], type: .type}]' \
+                > drift-resources.json
+              RESOURCES="$(cat drift-resources.json)"
+            else
+              DRIFT="error"
+              RESOURCES="[]"
+            fi
+            cat > drift/last-run.json <<EOF
+            {
+              "drift_detected": $DRIFT,
+              "changed_resources": $RESOURCES,
+              "last_checked": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            }
+            EOF
+        id: drift_check
+        working-directory: terraform
+      - run: |
+            git config user.name "github-actions"
+            git config user.email "github-actions@github.com"
+            git add drift/last-run.json
+            git commit -m "chore: update drift detection results [skip ci]" || echo "no changes to commit"
+            git push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        working-directory: .
